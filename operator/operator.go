@@ -280,11 +280,13 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 		replicas = *sts.Spec.Replicas
 	}
 
+	log.Infof("Actual replicas %d and desired replicas %d", replicas, desiredReplicas)
+
 	// prefer scale up over draining nodes.
 	if replicas < desiredReplicas {
 		err := o.rescaleStatefulSet(ctx, sts, sr)
 		if err != nil {
-			return fmt.Errorf("failed to rescale StatefulSet: %v", err)
+			return fmt.Errorf("failed to rescale StatefulSet while scaling UP: %v", err)
 		}
 
 		return sr.OnStableReplicasHook(ctx)
@@ -310,7 +312,7 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 	if pod == nil {
 		err := o.rescaleStatefulSet(ctx, sts, sr)
 		if err != nil {
-			return fmt.Errorf("failed to rescale StatefulSet: %v", err)
+			return fmt.Errorf("failed to rescale StatefulSet while pod==nil: %v", err)
 		}
 
 		err = waitForStableStatefulSet(ctx, o.kube, sts, stabilizationTimeout)
@@ -318,26 +320,6 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 			return fmt.Errorf("StatefulSet %s/%s is not stable: %v", sts.Namespace, sts.Name, err)
 		}
 		return sr.OnStableReplicasHook(ctx)
-	}
-
-	// scale out by one to perform the update
-	if int32(desiredReplicas) == replicas {
-		replicas++
-		sts.Spec.Replicas = &replicas
-
-		_, err = o.kube.AppsV1().StatefulSets(sts.Namespace).Update(ctx, sts, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to scale StatefulSet %s/%s to %d: %v", sts.Namespace, sts.Name, replicas, err)
-		}
-		o.recorder.Event(sr.Self(), v1.EventTypeNormal, "ScaledStatefulSet",
-			fmt.Sprintf("Scaled out StatefulSet '%s/%s' to %d Replicas to perform rolling update",
-				sts.Namespace, sts.Name, replicas))
-	}
-
-	// wait for StatefulSet to be stable before continuing
-	err = waitForStableStatefulSet(ctx, o.kube, sts, stabilizationTimeout)
-	if err != nil {
-		return fmt.Errorf("StatefulSet %s/%s is not stable: %v", sts.Namespace, sts.Name, err)
 	}
 
 	// TODO: make sure operation is being performed on the
@@ -361,15 +343,36 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 		pod.Namespace,
 		pod.Name))
 
-	// delete Pod
-	o.recorder.Event(sr.Self(), v1.EventTypeNormal, "DeletingPod", fmt.Sprintf("Deleting Pod '%s/%s'", pod.Namespace,
-		pod.Name))
-	err = o.kube.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
-		GracePeriodSeconds: pod.Spec.TerminationGracePeriodSeconds,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to delete Pod %s/%s: %v", pod.Namespace, pod.Name, err)
+	// scale out by one to perform the update
+	// if int32(desiredReplicas) == replicas {
+	{
+		replicas--
+		sts.Spec.Replicas = &replicas
+
+		_, err = o.kube.AppsV1().StatefulSets(sts.Namespace).Update(ctx, sts, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to scale StatefulSet while scaling DOWN %s/%s to %d: %v", sts.Namespace, sts.Name, replicas, err)
+		}
+		o.recorder.Event(sr.Self(), v1.EventTypeNormal, "ScaledStatefulSet",
+			fmt.Sprintf("Scaled out StatefulSet '%s/%s' to %d Replicas to perform rolling update",
+				sts.Namespace, sts.Name, replicas))
 	}
+
+	// wait for StatefulSet to be stable before continuing
+	err = waitForStableStatefulSet(ctx, o.kube, sts, stabilizationTimeout)
+	if err != nil {
+		return fmt.Errorf("StatefulSet %s/%s is not stable: %v", sts.Namespace, sts.Name, err)
+	}
+
+	// // delete Pod
+	// o.recorder.Event(sr.Self(), v1.EventTypeNormal, "DeletingPod", fmt.Sprintf("Deleting Pod '%s/%s'", pod.Namespace,
+	// 	pod.Name))
+	// err = o.kube.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+	// 	GracePeriodSeconds: pod.Spec.TerminationGracePeriodSeconds,
+	// })
+	// if err != nil {
+	// 	return fmt.Errorf("failed to delete Pod %s/%s: %v", pod.Namespace, pod.Name, err)
+	// }
 
 	// wait for Pod to be terminated and gone from the node.
 	err = waitForPodTermination(ctx, o.kube, pod)
@@ -705,38 +708,39 @@ func prioritizePodsForUpdate(pods []v1.Pod, sts *appsv1.StatefulSet, sr Stateful
 		prio := &updatePriority{
 			Pod:    pod,
 			Number: number,
+			// Priority: number, // we try to remove the latest pod
 		}
 
-		// if Pod is marked draining it gets the highest priority.
-		if _, ok := pod.Annotations[operatorPodDrainingAnnotationKey]; ok {
-			prio.Priority += podDrainingPriority
-		}
+		// // if Pod is marked draining it gets the highest priority.
+		// if _, ok := pod.Annotations[operatorPodDrainingAnnotationKey]; ok {
+		// 	prio.Priority += podDrainingPriority
+		// }
 
-		// check if Pod has assigned node
-		if pod.Spec.NodeName == "" {
-			log.Debugf("Skipping Pod %s/%s. No assigned node found.", prio.Pod.Namespace, prio.Pod.Name)
-			continue
-		}
+		// // check if Pod has assigned node
+		// if pod.Spec.NodeName == "" {
+		// 	log.Debugf("Skipping Pod %s/%s. No assigned node found.", prio.Pod.Namespace, prio.Pod.Name)
+		// 	continue
+		// }
 
-		// if Pod is on an unschedulable node it gets high priority.
-		// An unschedulable node indicates that it is about to be
-		// drained, so we should priorities moving pods away from the
-		// node.
-		if _, ok := unschedulableNodes[pod.Spec.NodeName]; ok {
-			prio.Priority += unschedulableNodePriority
-		}
+		// // if Pod is on an unschedulable node it gets high priority.
+		// // An unschedulable node indicates that it is about to be
+		// // drained, so we should priorities moving pods away from the
+		// // node.
+		// if _, ok := unschedulableNodes[pod.Spec.NodeName]; ok {
+		// 	prio.Priority += unschedulableNodePriority
+		// }
 
-		// if Pod is NOT on a priority selected node it gets high priority.
-		if _, ok := priorityNodes[pod.Spec.NodeName]; !ok {
-			prio.Priority += nodeSelectorPriority
-		}
+		// // if Pod is NOT on a priority selected node it gets high priority.
+		// if _, ok := priorityNodes[pod.Spec.NodeName]; !ok {
+		// 	prio.Priority += nodeSelectorPriority
+		// }
 
-		// if Pod has a different revision than the updated revision on
-		// the StatefulSet then it gets high priority.
-		// TODO: check if UpdateRevision is always set.
-		if hash, ok := pod.Labels[controllerRevisionHashLabelKey]; ok && sts.Status.UpdateRevision != hash {
-			prio.Priority += podOldRevisionPriority
-		}
+		// // if Pod has a different revision than the updated revision on
+		// // the StatefulSet then it gets high priority.
+		// // TODO: check if UpdateRevision is always set.
+		// if hash, ok := pod.Labels[controllerRevisionHashLabelKey]; ok && sts.Status.UpdateRevision != hash {
+		// 	prio.Priority += podOldRevisionPriority
+		// }
 
 		// if Pod is part of a StatefulSet where desired and actual
 		// replicas doesn't match then it gets medium priority.
@@ -748,9 +752,12 @@ func prioritizePodsForUpdate(pods []v1.Pod, sts *appsv1.StatefulSet, sr Stateful
 		}
 
 		// scale out by one to perform the update
-		if desiredReplicas != replicas {
+		//if desiredReplicas != replicas {
+		if desiredReplicas < replicas && number == int(replicas)-1 {
 			prio.Priority += stsReplicaDiffPriority
 		}
+
+		log.Infof("Pod %s with priority %d", pod.Name, prio.Priority)
 
 		priorities = append(priorities, prio)
 	}
