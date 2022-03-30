@@ -257,12 +257,42 @@ func (c *ESClient) setExcludeIPs(ips string) error {
 	return nil
 }
 
-func (c *ESClient) updateAutoRebalance(value string) error {
+func (c *ESClient) addComponentTemplate(filename string) error {
+	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
+	//oh, and template name
+
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
 		SetBody([]byte(
 			fmt.Sprintf(
-				`{"transient" : {"cluster.routing.rebalance.enable" : "%s"}}`,
+				`{
+					"template": {
+					  "settings": {
+						"number_of_shards": 1,
+						"number_of_replicas": 1
+					  }
+					}
+				  }`,
+			),
+		)).
+		Put(c.Endpoint.String() + "/_component_template/scaling")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+	return nil
+}
+
+func (c *ESClient) updateAutoRebalance(value string) error {
+	//TODO remove the concurrent_recoveries, it's just for testing
+
+	resp, err := resty.New().R().
+		SetHeader("Content-Type", "application/json").
+		SetBody([]byte(
+			fmt.Sprintf(
+				`{"transient" : {"cluster.routing.rebalance.enable" : "%s", "cluster.routing.allocation.node_concurrent_recoveries": 7}}`,
 				value,
 			),
 		)).
@@ -273,6 +303,10 @@ func (c *ESClient) updateAutoRebalance(value string) error {
 	if resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 	}
+
+	//TODO this will be somewhere else
+	c.addComponentTemplate("dummyvalue")
+
 	return nil
 }
 
