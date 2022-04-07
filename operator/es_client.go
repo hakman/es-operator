@@ -483,7 +483,7 @@ func (c *ESClient) updateAutoRebalance(value string) error {
 		SetHeader("Content-Type", "application/json").
 		SetBody([]byte(
 			fmt.Sprintf(
-				`{"transient" : {"cluster.routing.rebalance.enable" : "%s"}`,
+				`{"transient" : {"cluster.routing.rebalance.enable" : "%s"}}`,
 				value,
 			),
 		)).
