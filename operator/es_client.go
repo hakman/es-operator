@@ -257,42 +257,233 @@ func (c *ESClient) setExcludeIPs(ips string) error {
 	return nil
 }
 
-func (c *ESClient) addComponentTemplate(filename string) error {
+func (c *ESClient) addComponentTemplates(filename string) error {
 	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
 	//oh, and template name
 
+	templates := make(map[string]string)
+
+	templates["scaling"] = `{
+		"template": {
+		  "settings": {
+			"number_of_shards": 1,
+			"number_of_replicas": 1
+		  }
+		}
+	  }`
+
+	templates["logstash"] = `{
+		"template": {
+		  "settings": {
+			"index": {
+			  "refresh_interval": "5s"
+			}
+		  },
+		  "mappings": {
+			"dynamic_templates": [
+			  {
+				"message_field": {
+				  "path_match": "message",
+				  "mapping": {
+					"norms": false,
+					"type": "text"
+				  },
+				  "match_mapping_type": "string"
+				}
+			  },
+			  {
+				"string_fields": {
+				  "mapping": {
+					"norms": false,
+					"type": "text",
+					"fields": {
+					  "keyword": {
+						"ignore_above": 256,
+						"type": "keyword"
+					  }
+					}
+				  },
+				  "match_mapping_type": "string",
+				  "match": "*"
+				}
+			  }
+			],
+			"properties": {
+			  "@timestamp": {
+				"type": "date"
+			  },
+			  "geoip": {
+				"dynamic": true,
+				"properties": {
+				  "ip": {
+					"type": "ip"
+				  },
+				  "latitude": {
+					"type": "half_float"
+				  },
+				  "location": {
+					"type": "geo_point"
+				  },
+				  "longitude": {
+					"type": "half_float"
+				  }
+				}
+			  },
+			  "@version": {
+				"type": "keyword"
+			  }
+			}
+		  }
+		}
+	  }`
+
+	for templateName, templateValue := range templates {
+		resp, err := resty.New().R().
+			SetHeader("Content-Type", "application/json").
+			SetBody([]byte(
+				fmt.Sprintf(templateValue),
+			)).
+			Put(c.Endpoint.String() + "/_component_template/" + templateName)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode() != http.StatusOK {
+			return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+		}
+	}
+
+	return nil
+}
+
+func (c *ESClient) addTemplate(value string) error {
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
 		SetBody([]byte(
 			fmt.Sprintf(
 				`{
+					"index_patterns": ["logstash-*"],
+					"composed_of": ["logstash", "scaling"],
 					"template": {
 					  "settings": {
-						"number_of_shards": 1,
-						"number_of_replicas": 1
+						"plugins.index_state_management.rollover_alias": "logstash_write"
 					  }
 					}
 				  }`,
 			),
 		)).
-		Put(c.Endpoint.String() + "/_component_template/scaling")
+		Put(c.Endpoint.String() + "/_index_template/logstash") //TODO of course not necessarily "logstash". Read from file/resource
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 	}
+
 	return nil
 }
 
-func (c *ESClient) updateAutoRebalance(value string) error {
-	//TODO remove the concurrent_recoveries, it's just for testing
+func (c *ESClient) addISMPolicy(value string) error {
+	//TODO read from file
 
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
 		SetBody([]byte(
 			fmt.Sprintf(
-				`{"transient" : {"cluster.routing.rebalance.enable" : "%s", "cluster.routing.allocation.node_concurrent_recoveries": 7}}`,
+				`{
+					"policy": {
+					  "description": "Managed rollover policy (min_size will be adjusted with number of shards)",
+					  "default_state": "ingest",
+					  "states": [
+						{
+						  "name": "ingest",
+						  "actions": [
+							{
+							  "rollover": {
+								"min_doc_count": "2"
+							  }
+							}
+						  ],
+						  "transitions": [
+							{
+							  "state_name": "search"
+							}
+						  ]
+						},
+						{
+						  "name": "search",
+						  "actions": [],
+						  "transitions": [
+							{
+							  "state_name": "delete",
+							  "conditions": {
+								"min_index_age": "2m"
+							  }
+							}
+						  ]
+						},
+						{
+						  "name": "delete",
+						  "actions": [
+							{
+							  "delete": {}
+							}
+						  ],
+						  "transitions": []
+						}
+					  ],
+					  "ism_template": {
+						"index_patterns": [
+						  "logstash-*"
+						]
+					  }
+					}
+				  }`,
+			),
+		)).
+		Put(c.Endpoint.String() + "/_plugins/_ism/policies/rollover_delete_policy")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
+	return nil
+}
+
+func (c *ESClient) createFirstIndexIfMissing(value string) error {
+	//TODO check if missing. Loop through _aliases output
+
+	resp, err := resty.New().R().
+		SetHeader("Content-Type", "application/json").
+		SetBody([]byte(
+			fmt.Sprintf(
+				`{
+					"aliases": {
+					  "logstash_write": {
+						"is_write_index": true
+					  }
+					}
+				  }`,
+			),
+		)).
+		Put(c.Endpoint.String() + "/logstash-000001") //TODO again, not necessarily Logstash
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
+	return nil
+}
+
+func (c *ESClient) updateAutoRebalance(value string) error {
+	resp, err := resty.New().R().
+		SetHeader("Content-Type", "application/json").
+		SetBody([]byte(
+			fmt.Sprintf(
+				`{"transient" : {"cluster.routing.rebalance.enable" : "%s"}`,
 				value,
 			),
 		)).
@@ -305,7 +496,13 @@ func (c *ESClient) updateAutoRebalance(value string) error {
 	}
 
 	//TODO this will be somewhere else
-	c.addComponentTemplate("dummyvalue")
+	c.addComponentTemplates("dummyvalue")
+
+	c.addTemplate("dummyvalue")
+
+	c.addISMPolicy("dummyvalue")
+
+	c.createFirstIndexIfMissing("dummyvalue")
 
 	return nil
 }
