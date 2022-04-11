@@ -257,6 +257,72 @@ func (c *ESClient) setExcludeIPs(ips string) error {
 	return nil
 }
 
+func (c *ESClient) forceRollover() error {
+	//TODO: alias name should be dynamic
+	resp, err := resty.New().R().
+		SetHeader("Content-Type", "application/json").
+		SetBody([]byte(
+			fmt.Sprintf(
+				`{
+					"conditions": {
+					  "max_docs": 1
+					}
+				  }`,
+			),
+		)).
+		Post(c.Endpoint.String() + "/logstash_write/_rollover")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
+	return nil
+}
+
+// adjusts the number of shards according to the number of nodes
+func (c *ESClient) updateComponentTemplate() error {
+	nodes, err := c.GetNodes()
+	if err != nil {
+		return err
+	}
+
+	// even number of nodes? use half as the number of shards, because we have replicas
+	// TODO: make this work with arbitrary number of replicas
+	numberOfNodes := len(nodes)
+	numberOfShards := numberOfNodes
+	if numberOfNodes%2 == 0 {
+		numberOfShards = numberOfNodes / 2
+	}
+
+	//TODO: pick up the template name from somewhere. Or hardcode it?
+	resp, err := resty.New().R().
+		SetHeader("Content-Type", "application/json").
+		SetBody([]byte(
+			fmt.Sprintf(
+				`{
+					"template": {
+					  "settings": {
+						"number_of_shards": %d,
+						"number_of_replicas": 1
+					  }
+					}
+				  }`,
+				numberOfShards,
+			),
+		)).
+		Put(c.Endpoint.String() + "/_component_template/scaling")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
+	return nil
+}
+
 func (c *ESClient) addComponentTemplates(filename string) error {
 	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
 	//oh, and template name
@@ -382,10 +448,40 @@ func (c *ESClient) addTemplate(value string) error {
 	return nil
 }
 
-func (c *ESClient) addISMPolicy(value string) error {
-	//TODO read from file
-
+// add/update a rollover policy
+func (c *ESClient) updateISMPolicy() error {
+	//we need the number of shards to compute min_size
 	resp, err := resty.New().R().
+		Get(c.Endpoint.String() + "/_component_template/scaling") //TODO: can't we use a client here?
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+	esResponse := make(map[string]interface{})
+	err = json.Unmarshal(resp.Body(), &esResponse)
+	if err != nil {
+		return err
+	}
+
+	var numberOfShards int
+
+	template := esResponse["template"].(map[string]interface{})
+
+	settings := template["settings"].(map[string]interface{})
+
+	numberOfShards, ok := settings["number_of_shards"].(int)
+	if !ok {
+		return fmt.Errorf("Can't parse number_of_shards from ", resp.Body())
+	}
+
+	numberOfGb := numberOfShards * 10 //TODO configurable?
+	minSize := string(numberOfGb) + "gb"
+
+	//TODO read "meat" from file
+
+	resp, err = resty.New().R().
 		SetHeader("Content-Type", "application/json").
 		SetBody([]byte(
 			fmt.Sprintf(
@@ -399,7 +495,7 @@ func (c *ESClient) addISMPolicy(value string) error {
 						  "actions": [
 							{
 							  "rollover": {
-								"min_doc_count": "2"
+								"min_size": "%s"
 							  }
 							}
 						  ],
@@ -438,6 +534,7 @@ func (c *ESClient) addISMPolicy(value string) error {
 					  }
 					}
 				  }`,
+				minSize,
 			),
 		)).
 		Put(c.Endpoint.String() + "/_plugins/_ism/policies/rollover_delete_policy")
@@ -452,27 +549,50 @@ func (c *ESClient) addISMPolicy(value string) error {
 }
 
 func (c *ESClient) createFirstIndexIfMissing(value string) error {
-	//TODO check if missing. Loop through _aliases output
-
 	resp, err := resty.New().R().
-		SetHeader("Content-Type", "application/json").
-		SetBody([]byte(
-			fmt.Sprintf(
-				`{
-					"aliases": {
-					  "logstash_write": {
-						"is_write_index": true
-					  }
-					}
-				  }`,
-			),
-		)).
-		Put(c.Endpoint.String() + "/logstash-000001") //TODO again, not necessarily Logstash
+		Get(c.Endpoint.String() + "/_aliases")
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
+	var aliases map[string]interface{}
+	err = json.Unmarshal(resp.Body(), &aliases)
+	if err != nil {
+		return err
+	}
+
+	var indexFound bool
+	for indexName, _ := range aliases {
+		if strings.HasPrefix(indexName, "logstash-") { //TODO this would be the index pattern
+			indexFound = true
+			break
+		}
+	}
+
+	if !indexFound {
+		resp, err := resty.New().R().
+			SetHeader("Content-Type", "application/json").
+			SetBody([]byte(
+				fmt.Sprintf(
+					`{
+						"aliases": {
+						"logstash_write": {
+							"is_write_index": true
+						}
+						}
+					}`,
+				),
+			)).
+			Put(c.Endpoint.String() + "/logstash-000001") //TODO again, not necessarily Logstash
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode() != http.StatusOK {
+			return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+		}
 	}
 
 	return nil
@@ -500,7 +620,7 @@ func (c *ESClient) updateAutoRebalance(value string) error {
 
 	c.addTemplate("dummyvalue")
 
-	c.addISMPolicy("dummyvalue")
+	c.updateISMPolicy()
 
 	c.createFirstIndexIfMissing("dummyvalue")
 
