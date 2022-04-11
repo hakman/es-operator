@@ -406,9 +406,7 @@ func (c *ESClient) addComponentTemplates(filename string) error {
 	for templateName, templateValue := range templates {
 		resp, err := resty.New().R().
 			SetHeader("Content-Type", "application/json").
-			SetBody([]byte(
-				fmt.Sprintf(templateValue),
-			)).
+			SetBody([]byte(templateValue)).
 			Put(c.Endpoint.String() + "/_component_template/" + templateName)
 		if err != nil {
 			return err
@@ -467,13 +465,15 @@ func (c *ESClient) updateISMPolicy() error {
 
 	var numberOfShards int
 
-	template := esResponse["template"].(map[string]interface{})
+	templates := esResponse["component_template"].([]map[string]interface{})
 
-	settings := template["settings"].(map[string]interface{})
+	my_template := templates[0]["template"].(map[string]interface{})
 
-	numberOfShards, ok := settings["number_of_shards"].(int)
-	if !ok {
-		return fmt.Errorf("Can't parse number_of_shards from %s", resp.Body())
+	settings := my_template["settings"].(map[string]interface{})
+
+	numberOfShards, err = strconv.Atoi(settings["number_of_shards"].(string))
+	if err != nil {
+		return fmt.Errorf("can't parse number_of_shards from %s", resp.Body())
 	}
 
 	numberOfGb := numberOfShards * 10 //TODO configurable?
