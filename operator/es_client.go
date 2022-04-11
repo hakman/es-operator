@@ -465,15 +465,19 @@ func (c *ESClient) updateISMPolicy() error {
 
 	var numberOfShards int
 
-	templates := esResponse["component_template"].([]map[string]interface{})
+	if esResponse["component_template"] != nil {
+		templates := esResponse["component_template"].([]map[string]interface{})
 
-	my_template := templates[0]["template"].(map[string]interface{})
+		my_template := templates[0]["template"].(map[string]interface{})
 
-	settings := my_template["settings"].(map[string]interface{})
+		settings := my_template["settings"].(map[string]interface{})
 
-	numberOfShards, err = strconv.Atoi(settings["number_of_shards"].(string))
-	if err != nil {
-		return fmt.Errorf("can't parse number_of_shards from %s", resp.Body())
+		numberOfShards, err = strconv.Atoi(settings["number_of_shards"].(string))
+		if err != nil {
+			return fmt.Errorf("can't parse number_of_shards from %s", resp.Body())
+		}
+	} else {
+		numberOfShards = 1 //no template is there yet, assume 1
 	}
 
 	numberOfGb := numberOfShards * 10 //TODO configurable?
