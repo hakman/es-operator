@@ -473,11 +473,11 @@ func (c *ESClient) updateISMPolicy() error {
 
 	numberOfShards, ok := settings["number_of_shards"].(int)
 	if !ok {
-		return fmt.Errorf("Can't parse number_of_shards from ", resp.Body())
+		return fmt.Errorf("Can't parse number_of_shards from %s", resp.Body())
 	}
 
 	numberOfGb := numberOfShards * 10 //TODO configurable?
-	minSize := string(numberOfGb) + "gb"
+	minSize := fmt.Sprintf("%dgb", numberOfGb)
 
 	//TODO read "meat" from file
 
@@ -565,7 +565,7 @@ func (c *ESClient) createFirstIndexIfMissing(value string) error {
 	}
 
 	var indexFound bool
-	for indexName, _ := range aliases {
+	for indexName := range aliases {
 		if strings.HasPrefix(indexName, "logstash-") { //TODO this would be the index pattern
 			indexFound = true
 			break
