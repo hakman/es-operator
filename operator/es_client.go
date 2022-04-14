@@ -393,6 +393,7 @@ func (c *ESClient) updateComponentTemplate() error {
 	return nil
 }
 
+//add component templates with shards and other stuff
 func (c *ESClient) addComponentTemplates(filename string) error {
 	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
 	//oh, and template name
@@ -474,6 +475,7 @@ func (c *ESClient) addComponentTemplates(filename string) error {
 	  }`
 
 	for templateName, templateValue := range templates {
+		c.logger().Infof(fmt.Sprintf("Putting component template %s with value: %s", templateName, templateValue))
 		resp, err := resty.New().R().
 			SetHeader("Content-Type", "application/json").
 			SetBody([]byte(templateValue)).
@@ -489,18 +491,22 @@ func (c *ESClient) addComponentTemplates(filename string) error {
 	return nil
 }
 
+//upload the index template with our component templates
 func (c *ESClient) addTemplate(value string) error {
+	templateValue := `{
+		"index_patterns": ["logstash-*"],
+		"composed_of": ["logstash", "scaling"],
+		"template": {
+		  "settings": {
+			"plugins.index_state_management.rollover_alias": "logstash_write"
+		  }
+		}
+	  }`
+
+	c.logger().Infof("Uploading template with value: %s", templateValue)
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
-		SetBody(`{
-					"index_patterns": ["logstash-*"],
-					"composed_of": ["logstash", "scaling"],
-					"template": {
-					  "settings": {
-						"plugins.index_state_management.rollover_alias": "logstash_write"
-					  }
-					}
-				  }`).
+		SetBody(templateValue).
 		Put(c.Endpoint.String() + "/_index_template/logstash") //TODO of course not necessarily "logstash". Read from file/resource
 	if err != nil {
 		return err
@@ -537,7 +543,7 @@ func (c *ESClient) getISMPolicyVersionInfo() (int64, int64, error) {
 	return int64(seqNo), int64(primaryTerm), nil
 }
 
-// add/update a rollover policy
+// add/update a rollover policys
 func (c *ESClient) updateISMPolicy() error {
 	//we need the number of shards to compute min_size
 	resp, err := resty.New().R().
@@ -590,6 +596,9 @@ func (c *ESClient) updateISMPolicy() error {
 	}
 
 	//TODO read "meat" of the policy from a file
+
+	c.logger().Infof("Updating ISM policy with min_size %s, sequence number %d and primary term %d",
+		minSize, seqNo, primaryTerm)
 
 	resp, err = resty.New().R().
 		SetHeader("Content-Type", "application/json").
@@ -659,6 +668,7 @@ func (c *ESClient) updateISMPolicy() error {
 	return nil
 }
 
+// in order to start indexing and do rollover, we have to have the first index
 func (c *ESClient) createFirstIndexIfMissing(value string) error {
 	resp, err := resty.New().R().
 		Get(c.Endpoint.String() + "/_aliases")
@@ -684,6 +694,7 @@ func (c *ESClient) createFirstIndexIfMissing(value string) error {
 	}
 
 	if !indexFound {
+		c.logger().Infof("Didn't find Logstash index, will create one...")
 		resp, err := resty.New().R().
 			SetHeader("Content-Type", "application/json").
 			SetBody(`{
