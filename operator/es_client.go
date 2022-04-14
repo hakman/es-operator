@@ -335,15 +335,11 @@ func (c *ESClient) forceRollover() error {
 	//TODO: alias name should be dynamic
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
-		SetBody([]byte(
-			fmt.Sprintf(
-				`{
+		SetBody(`{
 					"conditions": {
 					  "max_docs": 1
 					}
-				  }`,
-			),
-		)).
+				  }`).
 		Post(c.Endpoint.String() + "/logstash_write/_rollover")
 	if err != nil {
 		return err
@@ -496,9 +492,7 @@ func (c *ESClient) addComponentTemplates(filename string) error {
 func (c *ESClient) addTemplate(value string) error {
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
-		SetBody([]byte(
-			fmt.Sprintf(
-				`{
+		SetBody(`{
 					"index_patterns": ["logstash-*"],
 					"composed_of": ["logstash", "scaling"],
 					"template": {
@@ -506,9 +500,7 @@ func (c *ESClient) addTemplate(value string) error {
 						"plugins.index_state_management.rollover_alias": "logstash_write"
 					  }
 					}
-				  }`,
-			),
-		)).
+				  }`).
 		Put(c.Endpoint.String() + "/_index_template/logstash") //TODO of course not necessarily "logstash". Read from file/resource
 	if err != nil {
 		return err
@@ -518,6 +510,31 @@ func (c *ESClient) addTemplate(value string) error {
 	}
 
 	return nil
+}
+
+func (c *ESClient) getISMPolicyVersionInfo() (int64, int64, error) {
+	resp, err := resty.New().R().
+		Get(c.Endpoint.String() + "_plugins/_ism/policies/rollover_delete_policy") //TODO: can't we use a client here?
+	if resp.StatusCode() == http.StatusNotFound {
+		return -1, -1, nil // no policy there
+	}
+	if err != nil {
+		return -1, -1, fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body()) // there was an error with the request
+	}
+
+	esResponse := make(map[string]interface{})
+	err = json.Unmarshal(resp.Body(), &esResponse)
+	if err != nil {
+		return -1, -1, err
+	}
+
+	var seqNo int64
+	var primaryTerm int64
+
+	seqNo = esResponse["_seq_no"].(int64)
+	primaryTerm = esResponse["_primary_term"].(int64)
+
+	return seqNo, primaryTerm, nil
 }
 
 // add/update a rollover policy
@@ -557,7 +574,22 @@ func (c *ESClient) updateISMPolicy() error {
 	numberOfGb := numberOfShards * 10 //TODO configurable?
 	minSize := fmt.Sprintf("%dgb", numberOfGb)
 
-	//TODO read "meat" from file
+	//check if the policy is already there. If it is, we need the _seq_no and _primary_term
+	var seqNo int64
+	var primaryTerm int64
+	seqNo, primaryTerm, err = c.getISMPolicyVersionInfo()
+
+	if err != nil {
+		return nil
+	}
+
+	versionInfo := ""
+
+	if seqNo != -1 && primaryTerm != -1 {
+		versionInfo = fmt.Sprintf("?if_seq_no=%d&if_primary_term=%d", seqNo, primaryTerm)
+	}
+
+	//TODO read "meat" of the policy from a file
 
 	resp, err = resty.New().R().
 		SetHeader("Content-Type", "application/json").
@@ -615,7 +647,8 @@ func (c *ESClient) updateISMPolicy() error {
 				minSize,
 			),
 		)).
-		Put(c.Endpoint.String() + "/_plugins/_ism/policies/rollover_delete_policy")
+		Put(c.Endpoint.String() + fmt.Sprintf("/_plugins/_ism/policies/rollover_delete_policy%s", versionInfo))
+		//TODO custom name instead of rollover_delete_policy
 	if err != nil {
 		return err
 	}
@@ -653,17 +686,13 @@ func (c *ESClient) createFirstIndexIfMissing(value string) error {
 	if !indexFound {
 		resp, err := resty.New().R().
 			SetHeader("Content-Type", "application/json").
-			SetBody([]byte(
-				fmt.Sprintf(
-					`{
+			SetBody(`{
 						"aliases": {
 						"logstash_write": {
 							"is_write_index": true
 						}
 						}
-					}`,
-				),
-			)).
+					}`).
 			Put(c.Endpoint.String() + "/logstash-000001") //TODO again, not necessarily Logstash
 		if err != nil {
 			return err
