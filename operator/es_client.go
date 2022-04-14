@@ -528,13 +528,13 @@ func (c *ESClient) getISMPolicyVersionInfo() (int64, int64, error) {
 		return -1, -1, err
 	}
 
-	var seqNo int64
-	var primaryTerm int64
+	var seqNo float64
+	var primaryTerm float64
 
-	seqNo = esResponse["_seq_no"].(int64)
-	primaryTerm = esResponse["_primary_term"].(int64)
+	seqNo = esResponse["_seq_no"].(float64)
+	primaryTerm = esResponse["_primary_term"].(float64)
 
-	return seqNo, primaryTerm, nil
+	return int64(seqNo), int64(primaryTerm), nil
 }
 
 // add/update a rollover policy
