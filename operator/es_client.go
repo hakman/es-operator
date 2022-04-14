@@ -514,7 +514,7 @@ func (c *ESClient) addTemplate(value string) error {
 
 func (c *ESClient) getISMPolicyVersionInfo() (int64, int64, error) {
 	resp, err := resty.New().R().
-		Get(c.Endpoint.String() + "_plugins/_ism/policies/rollover_delete_policy") //TODO: can't we use a client here?
+		Get(c.Endpoint.String() + "/_plugins/_ism/policies/rollover_delete_policy") //TODO: can't we use a client here?
 	if resp.StatusCode() == http.StatusNotFound {
 		return -1, -1, nil // no policy there
 	}
