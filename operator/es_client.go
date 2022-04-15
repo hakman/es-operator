@@ -396,7 +396,7 @@ func (c *ESClient) updateComponentTemplate() error {
 //add component templates with shards and other stuff
 func (c *ESClient) addComponentTemplates(filename string) error {
 	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
-	//oh, and template name
+	//oh, and template name..
 
 	templates := make(map[string]string)
 
