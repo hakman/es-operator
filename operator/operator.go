@@ -757,6 +757,8 @@ func prioritizePodsForUpdate(pods []v1.Pod, sts *appsv1.StatefulSet, sr Stateful
 			prio.Priority += stsReplicaDiffPriority
 		}
 
+		log.Infof("Pod %s with priority %d", pod.Name, prio.Priority)
+
 		priorities = append(priorities, prio)
 	}
 

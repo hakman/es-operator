@@ -733,14 +733,25 @@ func (c *ESClient) updateAutoRebalance(value string, originalESSettings *ESSetti
 		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 	}
 
-	//TODO this will be somewhere else
-	c.addComponentTemplates("dummyvalue")
+	// when we're done scaling up/down, we need to:
+	// - update the component template to change the number of shards
+	// - update the ISM policy's min_size value accordingly
+	// - force rollover, so we use the new number of shards
+
+	//TODO this will be somewhere else. Or maybe not?
+
+	//TODO cleanup
+	c.addComponentTemplates("dummyvalue") //THIS should be initialized somewhere else
+
+	c.updateComponentTemplate()
 
 	c.addTemplate("dummyvalue")
 
 	c.updateISMPolicy()
 
 	c.createFirstIndexIfMissing("dummyvalue")
+
+	c.forceRollover()
 
 	return nil
 }

@@ -571,9 +571,6 @@ func (r *EDSResource) applyScalingOperation(ctx context.Context) error {
 	}
 
 	if operation != nil && operation.ScalingDirection != NONE {
-		if operation.ScalingDirection == UP {
-			err = r.scaleUpTemplateAndRollover(ctx)
-		}
 		if err != nil {
 			return err
 		}
@@ -585,29 +582,6 @@ func (r *EDSResource) applyScalingOperation(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// when we scale up, we need to:
-// - update the component template to change the number of shards
-// - update the ISM policy's min_size value accordingly
-// - force rollover, so we use the new number of shards
-func (r *EDSResource) scaleUpTemplateAndRollover(ctx context.Context) error {
-	err := r.esClient.updateComponentTemplate()
-	if err != nil {
-		return err
-	}
-
-	err = r.esClient.updateISMPolicy()
-	if err != nil {
-		return err
-	}
-
-	err = r.esClient.forceRollover()
-	if err != nil {
-		return err
-
 	}
 	return nil
 }

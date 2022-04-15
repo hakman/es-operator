@@ -202,17 +202,32 @@ func (as *AutoScaler) calculateScalingOperation(managedIndices map[string]ESInde
 		return noopScalingOperation("No indices allocated yet.")
 	}
 
+	log.Infof("Scaling hint %s, desired node replicas %d", scalingHint.String(), *currentDesiredNodeReplicas)
+
 	scalingOperation := as.scaleUpOrDown(managedIndices, scalingHint, *currentDesiredNodeReplicas)
 
 	// safety check: ensure we don't scale below minIndexReplicas+1
 	if scalingOperation.NodeReplicas != nil && *scalingOperation.NodeReplicas < scalingSpec.MinIndexReplicas+1 {
-		return noopScalingOperation(fmt.Sprintf("Scaling would violate the minimum required nodes to hold %d index replicas.", scalingSpec.MinIndexReplicas))
+
+		logMessage := fmt.Sprintf("Scaling would violate the minimum required nodes to hold %d index replicas.",
+			scalingSpec.MinIndexReplicas)
+		log.Info(logMessage)
+		return noopScalingOperation(logMessage)
 	}
 
 	// safety check: ensure we don't scale-down if disk usage is already above threshold
-	if scalingOperation.ScalingDirection == DOWN && scalingSpec.DiskUsagePercentScaledownWatermark > 0 && as.getMaxDiskUsage(managedNodes) > float64(scalingSpec.DiskUsagePercentScaledownWatermark) {
-		return noopScalingOperation(fmt.Sprintf("Scaling would violate the minimum required disk free percent: %.2f", 75.0))
+	if scalingOperation.ScalingDirection == DOWN &&
+		scalingSpec.DiskUsagePercentScaledownWatermark > 0 &&
+		as.getMaxDiskUsage(managedNodes) > float64(scalingSpec.DiskUsagePercentScaledownWatermark) {
+
+		logMessage := fmt.Sprintf("Scaling would violate the minimum required disk free percent: %d",
+			scalingSpec.DiskUsagePercentScaledownWatermark)
+		log.Info(logMessage)
+		return noopScalingOperation(logMessage)
 	}
+
+	// log.Infof("Scaling operation: hint: %s, node replicas: %d, description: %s",
+	// 	scalingOperation.ScalingDirection.String(), *scalingOperation.NodeReplicas, scalingOperation.Description)
 
 	return scalingOperation
 }
