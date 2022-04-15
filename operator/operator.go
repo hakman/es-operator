@@ -703,54 +703,55 @@ func prioritizePodsForUpdate(pods []v1.Pod, sts *appsv1.StatefulSet, sr Stateful
 		}
 
 		prio := &updatePriority{
-			Pod:    pod,
-			Number: number,
+			Pod:      pod,
+			Number:   number,
+			Priority: number, // we try to remove the latest pod
 		}
 
-		// if Pod is marked draining it gets the highest priority.
-		if _, ok := pod.Annotations[operatorPodDrainingAnnotationKey]; ok {
-			prio.Priority += podDrainingPriority
-		}
+		// // if Pod is marked draining it gets the highest priority.
+		// if _, ok := pod.Annotations[operatorPodDrainingAnnotationKey]; ok {
+		// 	prio.Priority += podDrainingPriority
+		// }
 
-		// check if Pod has assigned node
-		if pod.Spec.NodeName == "" {
-			log.Debugf("Skipping Pod %s/%s. No assigned node found.", prio.Pod.Namespace, prio.Pod.Name)
-			continue
-		}
+		// // check if Pod has assigned node
+		// if pod.Spec.NodeName == "" {
+		// 	log.Debugf("Skipping Pod %s/%s. No assigned node found.", prio.Pod.Namespace, prio.Pod.Name)
+		// 	continue
+		// }
 
-		// if Pod is on an unschedulable node it gets high priority.
-		// An unschedulable node indicates that it is about to be
-		// drained, so we should priorities moving pods away from the
-		// node.
-		if _, ok := unschedulableNodes[pod.Spec.NodeName]; ok {
-			prio.Priority += unschedulableNodePriority
-		}
+		// // if Pod is on an unschedulable node it gets high priority.
+		// // An unschedulable node indicates that it is about to be
+		// // drained, so we should priorities moving pods away from the
+		// // node.
+		// if _, ok := unschedulableNodes[pod.Spec.NodeName]; ok {
+		// 	prio.Priority += unschedulableNodePriority
+		// }
 
-		// if Pod is NOT on a priority selected node it gets high priority.
-		if _, ok := priorityNodes[pod.Spec.NodeName]; !ok {
-			prio.Priority += nodeSelectorPriority
-		}
+		// // if Pod is NOT on a priority selected node it gets high priority.
+		// if _, ok := priorityNodes[pod.Spec.NodeName]; !ok {
+		// 	prio.Priority += nodeSelectorPriority
+		// }
 
-		// if Pod has a different revision than the updated revision on
-		// the StatefulSet then it gets high priority.
-		// TODO: check if UpdateRevision is always set.
-		if hash, ok := pod.Labels[controllerRevisionHashLabelKey]; ok && sts.Status.UpdateRevision != hash {
-			prio.Priority += podOldRevisionPriority
-		}
+		// // if Pod has a different revision than the updated revision on
+		// // the StatefulSet then it gets high priority.
+		// // TODO: check if UpdateRevision is always set.
+		// if hash, ok := pod.Labels[controllerRevisionHashLabelKey]; ok && sts.Status.UpdateRevision != hash {
+		// 	prio.Priority += podOldRevisionPriority
+		// }
 
-		// if Pod is part of a StatefulSet where desired and actual
-		// replicas doesn't match then it gets medium priority.
-		desiredReplicas := sr.Replicas()
+		// // if Pod is part of a StatefulSet where desired and actual
+		// // replicas doesn't match then it gets medium priority.
+		// desiredReplicas := sr.Replicas()
 
-		replicas := int32(0)
-		if sts.Spec.Replicas != nil {
-			replicas = *sts.Spec.Replicas
-		}
+		// replicas := int32(0)
+		// if sts.Spec.Replicas != nil {
+		// 	replicas = *sts.Spec.Replicas
+		// }
 
-		// scale out by one to perform the update
-		if desiredReplicas != replicas {
-			prio.Priority += stsReplicaDiffPriority
-		}
+		// // scale out by one to perform the update
+		// if desiredReplicas != replicas {
+		// 	prio.Priority += stsReplicaDiffPriority
+		// }
 
 		priorities = append(priorities, prio)
 	}
