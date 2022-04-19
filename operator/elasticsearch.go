@@ -520,6 +520,11 @@ func (r *EDSResource) PreScaleDownHook(ctx context.Context) error {
 	return r.applyScalingOperation(ctx)
 }
 
+// make sure template, shards, etc are OK and force rollover if needed
+func (r *EDSResource) AdjustSharding(dataNodes int) error {
+	return r.esClient.updateTemplatesPolicyAndRollover(dataNodes)
+}
+
 // OnStableReplicasHook ensures that the indexReplicas is set as defined in the
 // EDS scaling-operation annotation.
 func (r *EDSResource) OnStableReplicasHook(ctx context.Context) error {

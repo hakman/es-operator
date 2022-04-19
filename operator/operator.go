@@ -79,6 +79,9 @@ type StatefulResource interface {
 	// stage and has to be retried.
 	PreScaleDownHook(ctx context.Context) error
 
+	// make sure template, shards, etc are OK and force rollover if needed
+	AdjustSharding(dataNodes int) error
+
 	// OnStableReplicasHook is triggered when the statefulSet is observed
 	// to be stable meaning readyReplicas == desiredReplicas.
 	// This hook can for instance be used to perform cleanup tasks.
@@ -289,7 +292,13 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 			return fmt.Errorf("failed to rescale StatefulSet while scaling UP: %v", err)
 		}
 
-		return sr.OnStableReplicasHook(ctx)
+		err = sr.OnStableReplicasHook(ctx)
+		if err != nil {
+			return err
+		}
+
+		// once the cluster is stable, we'll need more shards
+		return sr.AdjustSharding(int(desiredReplicas))
 	}
 
 	opts := metav1.ListOptions{
@@ -319,7 +328,14 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 		if err != nil {
 			return fmt.Errorf("StatefulSet %s/%s is not stable: %v", sts.Namespace, sts.Name, err)
 		}
-		return sr.OnStableReplicasHook(ctx)
+
+		err = sr.OnStableReplicasHook(ctx)
+		if err != nil {
+			return err
+		}
+
+		// make sure sharding, templates, etc are as they should be
+		return sr.AdjustSharding(int(replicas))
 	}
 
 	// TODO: make sure operation is being performed on the
@@ -385,7 +401,14 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 		pod.Name))
 
 	// we don't know if we're done, ie. if there are more pods to be operated - returning false here.
-	return sr.OnStableReplicasHook(ctx)
+
+	// TODO: not sure about the comment above
+	err = sr.OnStableReplicasHook(ctx)
+	if err != nil {
+		return err
+	}
+
+	return sr.AdjustSharding(int(replicas))
 }
 
 // rescaleStatefulSet rescales the StatefulSet

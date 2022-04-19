@@ -233,7 +233,10 @@ func (c *ESClient) Cleanup(ctx context.Context) error {
 
 	if esSettings.GetPersistentRebalance().ValueOrZero() != "all" {
 		c.logger().Info("Enabling auto-rebalance")
-		return c.updateAutoRebalance("all", esSettings)
+		err = c.updateAutoRebalance("all", esSettings)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -352,36 +355,25 @@ func (c *ESClient) forceRollover() error {
 }
 
 // adjusts the number of shards according to the number of nodes
-func (c *ESClient) updateComponentTemplate() error {
-	nodes, err := c.GetNodes()
-	if err != nil {
-		return err
-	}
+func (c *ESClient) updateComponentTemplate(numberOfShards int) error {
+	template := fmt.Sprintf(
+		`{
+			"template": {
+			  "settings": {
+				"number_of_shards": %d,
+				"number_of_replicas": 1
+			  }
+			}
+		  }`,
+		numberOfShards,
+	)
 
-	// even number of nodes? use half as the number of shards, because we have replicas
-	// TODO: make this work with arbitrary number of replicas
-	numberOfNodes := len(nodes)
-	numberOfShards := numberOfNodes
-	if numberOfNodes%2 == 0 {
-		numberOfShards = numberOfNodes / 2
-	}
+	log.Infof("Putting template component: %s", template)
 
 	//TODO: pick up the template name from somewhere. Or hardcode it?
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
-		SetBody([]byte(
-			fmt.Sprintf(
-				`{
-					"template": {
-					  "settings": {
-						"number_of_shards": %d,
-						"number_of_replicas": 1
-					  }
-					}
-				  }`,
-				numberOfShards,
-			),
-		)).
+		SetBody(template).
 		Put(c.Endpoint.String() + "/_component_template/scaling")
 	if err != nil {
 		return err
@@ -394,20 +386,11 @@ func (c *ESClient) updateComponentTemplate() error {
 }
 
 //add component templates with shards and other stuff
-func (c *ESClient) addComponentTemplates(filename string) error {
+func (c *ESClient) addComponentTemplates() error {
 	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
 	//oh, and template name..
 
 	templates := make(map[string]string)
-
-	templates["scaling"] = `{
-		"template": {
-		  "settings": {
-			"number_of_shards": 1,
-			"number_of_replicas": 1
-		  }
-		}
-	  }`
 
 	templates["logstash"] = `{
 		"template": {
@@ -492,7 +475,7 @@ func (c *ESClient) addComponentTemplates(filename string) error {
 }
 
 //upload the index template with our component templates
-func (c *ESClient) addTemplate(value string) error {
+func (c *ESClient) addTemplate() error {
 	templateValue := `{
 		"index_patterns": ["logstash-*"],
 		"composed_of": ["logstash", "scaling"],
@@ -544,46 +527,13 @@ func (c *ESClient) getISMPolicyVersionInfo() (int64, int64, error) {
 }
 
 // add/update a rollover policys
-func (c *ESClient) updateISMPolicy() error {
-	//we need the number of shards to compute min_size
-	resp, err := resty.New().R().
-		Get(c.Endpoint.String() + "/_component_template/scaling") //TODO: can't we use a client here?
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
-	}
-	esResponse := make(map[string]interface{})
-	err = json.Unmarshal(resp.Body(), &esResponse)
-	if err != nil {
-		return err
-	}
-
-	var numberOfShards int
-
-	if esResponse["component_template"] != nil {
-		templates := esResponse["component_template"].([]map[string]interface{})
-
-		my_template := templates[0]["template"].(map[string]interface{})
-
-		settings := my_template["settings"].(map[string]interface{})
-
-		numberOfShards, err = strconv.Atoi(settings["number_of_shards"].(string))
-		if err != nil {
-			return fmt.Errorf("can't parse number_of_shards from %s", resp.Body())
-		}
-	} else {
-		numberOfShards = 1 //no template is there yet, assume 1
-	}
-
+func (c *ESClient) updateISMPolicy(numberOfShards int) error {
+	// compute min_size based on the number of shards
 	numberOfGb := numberOfShards * 10 //TODO configurable?
 	minSize := fmt.Sprintf("%dgb", numberOfGb)
 
 	//check if the policy is already there. If it is, we need the _seq_no and _primary_term
-	var seqNo int64
-	var primaryTerm int64
-	seqNo, primaryTerm, err = c.getISMPolicyVersionInfo()
+	seqNo, primaryTerm, err := c.getISMPolicyVersionInfo()
 
 	if err != nil {
 		return nil
@@ -600,7 +550,7 @@ func (c *ESClient) updateISMPolicy() error {
 	c.logger().Infof("Updating ISM policy with min_size %s, sequence number %d and primary term %d",
 		minSize, seqNo, primaryTerm)
 
-	resp, err = resty.New().R().
+	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
 		SetBody([]byte(
 			fmt.Sprintf(
@@ -669,7 +619,7 @@ func (c *ESClient) updateISMPolicy() error {
 }
 
 // in order to start indexing and do rollover, we have to have the first index
-func (c *ESClient) createFirstIndexIfMissing(value string) error {
+func (c *ESClient) createFirstIndexIfMissing() error {
 	resp, err := resty.New().R().
 		Get(c.Endpoint.String() + "/_aliases")
 	if err != nil {
@@ -720,6 +670,53 @@ func (esSettings *ESSettings) updateExcludeIps(ips string) {
 	esSettings.Persistent.Cluster.Routing.Allocation.Exclude.IP = null.StringFromPtr(&ips)
 }
 
+func (c *ESClient) updateTemplatesPolicyAndRollover(dataNodes int) error {
+	// when we're done scaling up/down, we need to:
+	// - update the component template to change the number of shards
+	// - update the ISM policy's min_size value accordingly
+	// - force rollover, so we use the new number of shards
+
+	//TODO make sure we only do stuff IF NEEDED
+	err := c.addComponentTemplates() //THIS should be initialized somewhere else
+	if err != nil {
+		return err
+	}
+
+	// even number of nodes? use half as the number of shards, because we have replicas
+	// TODO: make this work with arbitrary number of replicas
+	numberOfShards := dataNodes
+	if dataNodes%2 == 0 {
+		numberOfShards = dataNodes / 2
+	}
+
+	err = c.updateComponentTemplate(numberOfShards)
+	if err != nil {
+		return err
+	}
+
+	err = c.addTemplate()
+	if err != nil {
+		return err
+	}
+
+	err = c.updateISMPolicy(numberOfShards)
+	if err != nil {
+		return err
+	}
+
+	err = c.createFirstIndexIfMissing()
+	if err != nil {
+		return err
+	}
+
+	err = c.forceRollover()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (c *ESClient) updateAutoRebalance(value string, originalESSettings *ESSettings) error {
 	originalESSettings.updateRebalance(value)
 	resp, err := resty.New().R().
@@ -732,26 +729,6 @@ func (c *ESClient) updateAutoRebalance(value string, originalESSettings *ESSetti
 	if resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 	}
-
-	// when we're done scaling up/down, we need to:
-	// - update the component template to change the number of shards
-	// - update the ISM policy's min_size value accordingly
-	// - force rollover, so we use the new number of shards
-
-	//TODO this will be somewhere else. Or maybe not?
-
-	//TODO cleanup
-	c.addComponentTemplates("dummyvalue") //THIS should be initialized somewhere else
-
-	c.updateComponentTemplate()
-
-	c.addTemplate("dummyvalue")
-
-	c.updateISMPolicy()
-
-	c.createFirstIndexIfMissing("dummyvalue")
-
-	c.forceRollover()
 
 	return nil
 }
