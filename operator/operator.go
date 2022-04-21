@@ -294,7 +294,7 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 
 		err = sr.OnStableReplicasHook(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("encountered error while executing OnStableReplicasHook: %v", err)
 		}
 
 		// once the cluster is stable, we'll need more shards
@@ -331,7 +331,7 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 
 		err = sr.OnStableReplicasHook(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("encountered error while executing OnStableReplicasHook: %v", err)
 		}
 
 		// make sure sharding, templates, etc are as they should be
@@ -405,7 +405,7 @@ func (o *Operator) operatePods(ctx context.Context, sts *appsv1.StatefulSet, sr 
 	// TODO: not sure about the comment above
 	err = sr.OnStableReplicasHook(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("encountered error while executing OnStableReplicasHook: %v", err)
 	}
 
 	return sr.AdjustSharding(int(replicas))

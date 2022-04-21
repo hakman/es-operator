@@ -336,14 +336,16 @@ func (c *ESClient) setExcludeIPs(ips string, originalESSettings *ESSettings) err
 
 func (c *ESClient) forceRollover() error {
 	//TODO: alias name should be dynamic
+	aliasName := "logstash_write"
+
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
 		SetBody(`{
 					"conditions": {
-					  "max_docs": 1
+					  "max_docs": 0
 					}
 				  }`).
-		Post(c.Endpoint.String() + "/logstash_write/_rollover")
+		Post(c.Endpoint.String() + "/" + aliasName + "/_rollover")
 	if err != nil {
 		return err
 	}
@@ -581,7 +583,7 @@ func (c *ESClient) updateISMPolicy(numberOfShards int) error {
 							{
 							  "state_name": "delete",
 							  "conditions": {
-								"min_index_age": "2m"
+								"min_index_age": "7d"
 							  }
 							}
 						  ]
@@ -608,7 +610,9 @@ func (c *ESClient) updateISMPolicy(numberOfShards int) error {
 		)).
 		Put(c.Endpoint.String() + fmt.Sprintf("/_plugins/_ism/policies/rollover_delete_policy%s", versionInfo))
 		//TODO custom name instead of rollover_delete_policy
+
 	if err != nil {
+		c.logger().Errorf("Error while updating rollover policy: %s", err.Error())
 		return err
 	}
 	if resp.StatusCode() != http.StatusOK {
@@ -618,24 +622,88 @@ func (c *ESClient) updateISMPolicy(numberOfShards int) error {
 	return nil
 }
 
-// in order to start indexing and do rollover, we have to have the first index
-func (c *ESClient) createFirstIndexIfMissing() error {
+func (c *ESClient) getShardsOfWriteIndex() (int, error) {
+	aliasName := "logstash_write" //TODO this should loop through everything we manage
+	resp, err := resty.New().R().
+		Get(c.Endpoint.String() + "/" + aliasName)
+	if err != nil {
+		return -1, err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return -1, fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
+	var indices map[string]interface{}
+	err = json.Unmarshal(resp.Body(), &indices)
+	if err != nil {
+		return -1, err
+	}
+
+	currentNumberOfShards := -1
+	for indexName := range indices {
+		if strings.HasPrefix(indexName, "logstash-") { //TODO this would be the index pattern
+			indexObject := indices[indexName].(map[string]interface{})
+			aliasesObject, ok := indexObject["aliases"].(map[string]interface{})
+			if ok { //TODO at this point it feels like we need a nicer JSON parser
+				aliasObject, ok := aliasesObject[aliasName].(map[string]interface{})
+				if ok {
+					writeIndexFound, ok := aliasObject["is_write_index"].(bool)
+					if ok {
+						if writeIndexFound {
+							settingsObject, ok := indexObject["settings"].(map[string]interface{})
+							if ok {
+								settingsIndexObject, ok := settingsObject["index"].(map[string]interface{})
+								if ok {
+									currentNumberOfShardsString, ok := settingsIndexObject["number_of_shards"].(string)
+									if ok {
+										currentNumberOfShards, err = strconv.Atoi(currentNumberOfShardsString)
+										if err != nil {
+											return -1, fmt.Errorf("can't convert %s number_of_shards to int", currentNumberOfShardsString)
+										}
+										break
+									} else {
+										return -1, fmt.Errorf("can't find number_of_shards for %s", indexName)
+									}
+								} else {
+									return -1, fmt.Errorf("can't find the 'index' setting key for %s", indexName)
+								}
+							} else {
+								return -1, fmt.Errorf("can't find 'settings' key for %s", indexName)
+							}
+						}
+					} else {
+						log.Debugf("can't find %s key of the %s index", "is_write_index", indexName)
+					}
+				} else {
+					log.Debugf("can't find %s key of the %s index", aliasName, indexName)
+				}
+			} else {
+				log.Debugf("can't find %s key of the %s index", "aliases", indexName)
+			}
+		}
+	}
+
+	return currentNumberOfShards, nil
+
+}
+
+func (c *ESClient) getFirstIndexExists() (bool, error) {
 	resp, err := resty.New().R().
 		Get(c.Endpoint.String() + "/_aliases")
 	if err != nil {
-		return err
+		return false, err
 	}
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+		return false, fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 	}
 
 	var aliases map[string]interface{}
 	err = json.Unmarshal(resp.Body(), &aliases)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	var indexFound bool
+	indexFound := false
 	for indexName := range aliases {
 		if strings.HasPrefix(indexName, "logstash-") { //TODO this would be the index pattern
 			indexFound = true
@@ -643,24 +711,27 @@ func (c *ESClient) createFirstIndexIfMissing() error {
 		}
 	}
 
-	if !indexFound {
-		c.logger().Infof("Didn't find Logstash index, will create one...")
-		resp, err := resty.New().R().
-			SetHeader("Content-Type", "application/json").
-			SetBody(`{
-						"aliases": {
-						"logstash_write": {
-							"is_write_index": true
-						}
-						}
-					}`).
-			Put(c.Endpoint.String() + "/logstash-000001") //TODO again, not necessarily Logstash
-		if err != nil {
-			return err
-		}
-		if resp.StatusCode() != http.StatusOK {
-			return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
-		}
+	return indexFound, nil
+}
+
+// in order to start indexing and do rollover, we have to have the first index
+func (c *ESClient) createFirstIndex() error {
+	c.logger().Infof("Didn't find Logstash index, will create one...")
+	resp, err := resty.New().R().
+		SetHeader("Content-Type", "application/json").
+		SetBody(`{
+					"aliases": {
+					"logstash_write": {
+						"is_write_index": true
+					}
+					}
+				}`).
+		Put(c.Endpoint.String() + "/logstash-000001") //TODO again, not necessarily Logstash
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 	}
 
 	return nil
@@ -677,7 +748,7 @@ func (c *ESClient) updateTemplatesPolicyAndRollover(dataNodes int) error {
 	// - force rollover, so we use the new number of shards
 
 	//TODO make sure we only do stuff IF NEEDED
-	err := c.addComponentTemplates() //THIS should be initialized somewhere else
+	err := c.addComponentTemplates()
 	if err != nil {
 		return err
 	}
@@ -704,14 +775,33 @@ func (c *ESClient) updateTemplatesPolicyAndRollover(dataNodes int) error {
 		return err
 	}
 
-	err = c.createFirstIndexIfMissing()
+	indexFound, err := c.getFirstIndexExists()
 	if err != nil {
 		return err
 	}
 
-	err = c.forceRollover()
-	if err != nil {
-		return err
+	if !indexFound {
+		err = c.createFirstIndex()
+		if err != nil {
+			return err
+		}
+	} else {
+		currentNumberOfShards, err := c.getShardsOfWriteIndex()
+		if err != nil {
+			c.logger().Errorf("Failed to get current number of shards for the write alias: %s", err.Error())
+			return err
+		}
+
+		c.logger().Infof("For alias: %s we have %d shards and we want %d shards",
+			"logstash_write", currentNumberOfShards, numberOfShards)
+		if currentNumberOfShards != numberOfShards {
+			c.logger().Infof("Forcing rollover for alias: %s to change from %d to %d shards",
+				"logstash_write", currentNumberOfShards, numberOfShards)
+			err = c.forceRollover()
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
