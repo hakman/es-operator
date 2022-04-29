@@ -238,6 +238,20 @@ func (c *ESClient) Drain(ctx context.Context, pod *v1.Pod) error {
 	if err != nil {
 		return err
 	}
+
+	c.logger().
+		Infof("Removing total_shards_per_node from all indices. New rolled over index will have the new value")
+	resp, err := resty.New().R().
+		SetHeader("Content-Type", "application/json").
+		SetBody(`{"index.routing.allocation.total_shards_per_node": null}`).
+		Put(c.Endpoint.String() + "/_settings")
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
 	c.logger().Info("Disabling auto-rebalance")
 	esSettings, err := c.getClusterSettings()
 	if err != nil {
@@ -473,12 +487,18 @@ func (c *ESClient) getShardsComponentTemplate(templateName string, numberOfShard
 }
 
 // adjusts the number of shards according to the number of nodes. If needed
-func (c *ESClient) updateShardsComponentTemplate(numberOfShards int) error {
+func (c *ESClient) updateShardsComponentTemplate(numberOfShards int, dataNodes int) error {
 	templateName := "scaling" //TODO configurable?
 
 	needsUpdating, err := c.getShardsComponentTemplate(templateName, numberOfShards)
 	if err != nil {
 		return err
+	}
+
+	//TODO make this work with an arbitrary number of replicas
+	totalShardsPerNode := 2
+	if dataNodes%2 == 0 {
+		totalShardsPerNode = 1
 	}
 
 	if needsUpdating {
@@ -487,11 +507,12 @@ func (c *ESClient) updateShardsComponentTemplate(numberOfShards int) error {
 			"template": {
 			  "settings": {
 				"number_of_shards": %d,
-				"number_of_replicas": 1
+				"number_of_replicas": 1,
+				"index.routing.allocation.total_shards_per_node": %d
 			  }
 			}
 		  }`,
-			numberOfShards,
+			numberOfShards, totalShardsPerNode,
 		)
 
 		log.Infof("Putting template component: %s", template)
@@ -927,7 +948,7 @@ func (c *ESClient) updateTemplatesPolicyAndRollover(dataNodes int) error {
 	}
 
 	//TODO only if number of shards is different now
-	err = c.updateShardsComponentTemplate(numberOfShards)
+	err = c.updateShardsComponentTemplate(numberOfShards, dataNodes)
 	if err != nil {
 		return err
 	}
