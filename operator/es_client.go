@@ -98,6 +98,72 @@ type ESSettings struct {
 	Persistent ClusterSettings `json:"persistent,omitempty"`
 }
 
+// ISMPolicy reporesents the response from /_plugins/_ism/policies/POLICY_NAME_GOES_HERE
+type ISMPolicy struct {
+	Policy      Policy  `json:"policy"`
+	SeqNo       float64 `json:"_seq_no"`
+	PrimaryTerm float64 `json:"_primary_term"`
+}
+
+// "policy" object from the ISM policy
+type Policy struct {
+	States []State `json:"states,omitempty"`
+}
+
+// each state object from an ISM policy
+type State struct {
+	Actions []Action `json:"actions,omitempty"`
+}
+
+// each action within a state of an ISM policy
+type Action struct {
+	Rollover *Rollover `json:"rollover,omitempty"`
+}
+
+// rollover action properties
+type Rollover struct {
+	MinSize string `json:"min_size,omitempty"`
+}
+
+// essential info from an ISM Policy. Good for passing around
+type ISMPolicyInfo struct {
+	SeqNo           int64
+	PrimaryTerm     int64
+	RolloverMinSize string
+	err             error
+}
+
+// response of a _component_template GET call
+type ComponentTemplateResponse struct {
+	ComponentTemplates []ComponentTemplate `json:"component_templates,omitempty"`
+}
+
+// element of the component_templates array
+type ComponentTemplate struct {
+	Name                    string                  `json:"name"`
+	ComponentTemplateObject ComponentTemplateObject `json:"component_template"`
+}
+
+// component_template object
+type ComponentTemplateObject struct {
+	Template TemplateObject `json:"template"`
+}
+
+// template object of a component template
+type TemplateObject struct {
+	Settings *ComponentTemplateSettings `json:"settings,omitempty"`
+}
+
+// settings object of component template
+type ComponentTemplateSettings struct {
+	Index *ComponentTemplateIndexSettings `json:"index,omitempty"`
+}
+
+// index settings object of component template
+type ComponentTemplateIndexSettings struct {
+	NumberOfShards *string `json:"number_of_shards,omitempty"`
+}
+
 func deduplicateIPs(excludedIPsString string) string {
 	if excludedIPsString == "" {
 		return ""
@@ -356,10 +422,68 @@ func (c *ESClient) forceRollover() error {
 	return nil
 }
 
-// adjusts the number of shards according to the number of nodes
-func (c *ESClient) updateComponentTemplate(numberOfShards int) error {
-	template := fmt.Sprintf(
-		`{
+// checks if the shards component template needs updating
+func (c *ESClient) getShardsComponentTemplate(templateName string, numberOfShards int) (bool, error) {
+	resp, err := resty.New().R().
+		Get(c.Endpoint.String() + "/_component_template/" + templateName)
+	if resp.StatusCode() == http.StatusNotFound {
+		return true, nil // component template doesn't exist, we have to create it
+	}
+	if err != nil {
+		// there was an error with the request
+		return false, fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+	}
+
+	var componentTemplateResponse ComponentTemplateResponse
+	err = json.Unmarshal(resp.Body(), &componentTemplateResponse)
+	if err != nil {
+		return false, err
+	}
+
+	for _, componentTemplate := range componentTemplateResponse.ComponentTemplates {
+		if componentTemplate.Name == templateName {
+			settings := componentTemplate.ComponentTemplateObject.Template.Settings
+			if settings != nil {
+				if settings.Index != nil {
+					if settings.Index.NumberOfShards != nil {
+						currentNumberOfShards, err := strconv.Atoi(*settings.Index.NumberOfShards)
+						if err != nil {
+							return false, fmt.Errorf("can't convert %s number_of_shards to int",
+								*settings.Index.NumberOfShards)
+						}
+						if currentNumberOfShards != numberOfShards {
+							return true, nil // wrong number of shards, need to update template
+						} else {
+							return false, nil
+						}
+					} else {
+						return true, nil // no "index" object => needs updating
+					}
+				} else {
+					return true, nil //no "settings" object => needs updating
+				}
+			}
+			break
+		}
+	}
+
+	// we shouldn't get here unless we can't find the template with our name,
+	// though we specifically asked for it. In this case, let's update the template to be sure
+	return true, nil
+}
+
+// adjusts the number of shards according to the number of nodes. If needed
+func (c *ESClient) updateShardsComponentTemplate(numberOfShards int) error {
+	templateName := "scaling" //TODO configurable?
+
+	needsUpdating, err := c.getShardsComponentTemplate(templateName, numberOfShards)
+	if err != nil {
+		return err
+	}
+
+	if needsUpdating {
+		template := fmt.Sprintf(
+			`{
 			"template": {
 			  "settings": {
 				"number_of_shards": %d,
@@ -367,103 +491,14 @@ func (c *ESClient) updateComponentTemplate(numberOfShards int) error {
 			  }
 			}
 		  }`,
-		numberOfShards,
-	)
+			numberOfShards,
+		)
 
-	log.Infof("Putting template component: %s", template)
+		log.Infof("Putting template component: %s", template)
 
-	//TODO: pick up the template name from somewhere. Or hardcode it?
-	resp, err := resty.New().R().
-		SetHeader("Content-Type", "application/json").
-		SetBody(template).
-		Put(c.Endpoint.String() + "/_component_template/scaling")
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
-	}
-
-	return nil
-}
-
-//add component templates with shards and other stuff
-func (c *ESClient) addComponentTemplates() error {
-	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
-	//oh, and template name..
-
-	templates := make(map[string]string)
-
-	templates["logstash"] = `{
-		"template": {
-		  "settings": {
-			"index": {
-			  "refresh_interval": "5s"
-			}
-		  },
-		  "mappings": {
-			"dynamic_templates": [
-			  {
-				"message_field": {
-				  "path_match": "message",
-				  "mapping": {
-					"norms": false,
-					"type": "text"
-				  },
-				  "match_mapping_type": "string"
-				}
-			  },
-			  {
-				"string_fields": {
-				  "mapping": {
-					"norms": false,
-					"type": "text",
-					"fields": {
-					  "keyword": {
-						"ignore_above": 256,
-						"type": "keyword"
-					  }
-					}
-				  },
-				  "match_mapping_type": "string",
-				  "match": "*"
-				}
-			  }
-			],
-			"properties": {
-			  "@timestamp": {
-				"type": "date"
-			  },
-			  "geoip": {
-				"dynamic": true,
-				"properties": {
-				  "ip": {
-					"type": "ip"
-				  },
-				  "latitude": {
-					"type": "half_float"
-				  },
-				  "location": {
-					"type": "geo_point"
-				  },
-				  "longitude": {
-					"type": "half_float"
-				  }
-				}
-			  },
-			  "@version": {
-				"type": "keyword"
-			  }
-			}
-		  }
-		}
-	  }`
-
-	for templateName, templateValue := range templates {
-		c.logger().Infof(fmt.Sprintf("Putting component template %s with value: %s", templateName, templateValue))
 		resp, err := resty.New().R().
 			SetHeader("Content-Type", "application/json").
-			SetBody([]byte(templateValue)).
+			SetBody(template).
 			Put(c.Endpoint.String() + "/_component_template/" + templateName)
 		if err != nil {
 			return err
@@ -471,86 +506,218 @@ func (c *ESClient) addComponentTemplates() error {
 		if resp.StatusCode() != http.StatusOK {
 			return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 		}
+	} else {
+		c.logger().Debugf("No need to update %s as it seems to have %d shards", templateName, numberOfShards)
 	}
 
 	return nil
 }
 
-//upload the index template with our component templates
-func (c *ESClient) addTemplate() error {
-	templateValue := `{
-		"index_patterns": ["logstash-*"],
-		"composed_of": ["logstash", "scaling"],
-		"template": {
-		  "settings": {
-			"plugins.index_state_management.rollover_alias": "logstash_write"
-		  }
-		}
-	  }`
+//add main component template, containing mappings and such, except sharding. If it exists
+func (c *ESClient) addMainComponentTemplate() error {
+	//TODO: we'll want to use the value as the filename? So we can put Logstash and generic templates
+	//oh, and template name..
 
-	c.logger().Infof("Uploading template with value: %s", templateValue)
 	resp, err := resty.New().R().
-		SetHeader("Content-Type", "application/json").
-		SetBody(templateValue).
-		Put(c.Endpoint.String() + "/_index_template/logstash") //TODO of course not necessarily "logstash". Read from file/resource
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+		Get(c.Endpoint.String() + "/_component_template/logstash") //TODO again, configurable
+	if resp.StatusCode() == http.StatusNotFound {
+		templateName := "logstash"
+
+		template := `{
+			"template": {
+			"settings": {
+				"index": {
+				"refresh_interval": "5s"
+				}
+			},
+			"mappings": {
+				"dynamic_templates": [
+				{
+					"message_field": {
+					"path_match": "message",
+					"mapping": {
+						"norms": false,
+						"type": "text"
+					},
+					"match_mapping_type": "string"
+					}
+				},
+				{
+					"string_fields": {
+					"mapping": {
+						"norms": false,
+						"type": "text",
+						"fields": {
+						"keyword": {
+							"ignore_above": 256,
+							"type": "keyword"
+						}
+						}
+					},
+					"match_mapping_type": "string",
+					"match": "*"
+					}
+				}
+				],
+				"properties": {
+				"@timestamp": {
+					"type": "date"
+				},
+				"geoip": {
+					"dynamic": true,
+					"properties": {
+					"ip": {
+						"type": "ip"
+					},
+					"latitude": {
+						"type": "half_float"
+					},
+					"location": {
+						"type": "geo_point"
+					},
+					"longitude": {
+						"type": "half_float"
+					}
+					}
+				},
+				"@version": {
+					"type": "keyword"
+				}
+				}
+			}
+			}
+		}`
+
+		c.logger().Infof(fmt.Sprintf("Putting component template %s with value: %s", templateName, template))
+		resp, err := resty.New().R().
+			SetHeader("Content-Type", "application/json").
+			SetBody([]byte(template)).
+			Put(c.Endpoint.String() + "/_component_template/" + templateName)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode() != http.StatusOK {
+			return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+		}
+	} else {
+		if err != nil {
+			return err
+		}
+		c.logger().Debug("Found main component template, not overwriting")
 	}
 
 	return nil
 }
 
-func (c *ESClient) getISMPolicyVersionInfo() (int64, int64, error) {
+//upload the index template with our component templates. If it doesn't exist
+func (c *ESClient) addTemplate() error {
+	resp, err := resty.New().R().
+		Get(c.Endpoint.String() + "/_index_template/logstash") //TODO again, configurable
+	if resp.StatusCode() == http.StatusNotFound {
+		templateValue := `{
+			"index_patterns": ["logstash-*"],
+			"composed_of": ["logstash", "scaling"],
+			"template": {
+			"settings": {
+				"plugins.index_state_management.rollover_alias": "logstash_write"
+			}
+			}
+		}`
+
+		c.logger().Infof("Adding index template with value: %s", templateValue)
+		resp, err := resty.New().R().
+			SetHeader("Content-Type", "application/json").
+			SetBody(templateValue).
+			Put(c.Endpoint.String() + "/_index_template/logstash") //TODO of course not necessarily "logstash". Read from file/resource
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode() != http.StatusOK {
+			return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
+		}
+	} else {
+		if err != nil {
+			return err
+		}
+		c.logger().Debug("Found index template, not overwriting")
+	}
+
+	return nil
+}
+
+func (c *ESClient) getISMPolicyInfo() ISMPolicyInfo {
+	var response ISMPolicyInfo
+	response.SeqNo = -1
+	response.PrimaryTerm = -1
+	response.RolloverMinSize = ""
+	response.err = nil
+
 	resp, err := resty.New().R().
 		Get(c.Endpoint.String() + "/_plugins/_ism/policies/rollover_delete_policy") //TODO: can't we use a client here?
 	if resp.StatusCode() == http.StatusNotFound {
-		return -1, -1, nil // no policy there
+		return response // no policy there
 	}
 	if err != nil {
-		return -1, -1, fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body()) // there was an error with the request
+		response.err = fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body()) // there was an error with the request
+		return response
 	}
 
-	esResponse := make(map[string]interface{})
-	err = json.Unmarshal(resp.Body(), &esResponse)
+	var policy ISMPolicy
+	err = json.Unmarshal(resp.Body(), &policy)
 	if err != nil {
-		return -1, -1, err
+		response.err = err
+		return response
 	}
 
-	var seqNo float64
-	var primaryTerm float64
+	response.SeqNo = int64(policy.SeqNo)
+	response.PrimaryTerm = int64(policy.PrimaryTerm)
 
-	seqNo = esResponse["_seq_no"].(float64)
-	primaryTerm = esResponse["_primary_term"].(float64)
+	foundRollover := false //we stop looking when we found the first rollover condition
+	for _, state := range policy.Policy.States {
+		for _, action := range state.Actions {
+			if action.Rollover != nil {
+				response.RolloverMinSize = action.Rollover.MinSize
+				foundRollover = true
+				break
+			}
+		}
+		if foundRollover {
+			break
+		}
+	}
 
-	return int64(seqNo), int64(primaryTerm), nil
+	return response
 }
 
-// add/update a rollover policys
+// add/update rollover policy if necessary
 func (c *ESClient) updateISMPolicy(numberOfShards int) error {
 	// compute min_size based on the number of shards
 	numberOfGb := numberOfShards * 10 //TODO configurable?
 	minSize := fmt.Sprintf("%dgb", numberOfGb)
 
 	//check if the policy is already there. If it is, we need the _seq_no and _primary_term
-	seqNo, primaryTerm, err := c.getISMPolicyVersionInfo()
+	policyInfo := c.getISMPolicyInfo()
 
-	if err != nil {
+	if policyInfo.err != nil {
+		return policyInfo.err
+	}
+
+	if policyInfo.RolloverMinSize == minSize {
+		c.logger().Debugf("ISM Policy already rotates at %s, so we skip updating it", minSize)
 		return nil
 	}
 
 	versionInfo := ""
 
-	if seqNo != -1 && primaryTerm != -1 {
-		versionInfo = fmt.Sprintf("?if_seq_no=%d&if_primary_term=%d", seqNo, primaryTerm)
+	if policyInfo.SeqNo != -1 && policyInfo.PrimaryTerm != -1 {
+		versionInfo = fmt.Sprintf("?if_seq_no=%d&if_primary_term=%d",
+			policyInfo.SeqNo, policyInfo.PrimaryTerm)
 	}
 
 	//TODO read "meat" of the policy from a file
 
 	c.logger().Infof("Updating ISM policy with min_size %s, sequence number %d and primary term %d",
-		minSize, seqNo, primaryTerm)
+		minSize, policyInfo.SeqNo, policyInfo.PrimaryTerm)
 
 	resp, err := resty.New().R().
 		SetHeader("Content-Type", "application/json").
@@ -615,7 +782,7 @@ func (c *ESClient) updateISMPolicy(numberOfShards int) error {
 		c.logger().Errorf("Error while updating rollover policy: %s", err.Error())
 		return err
 	}
-	if resp.StatusCode() != http.StatusOK {
+	if resp.StatusCode() != http.StatusCreated && resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("code status %d - %s", resp.StatusCode(), resp.Body())
 	}
 
@@ -747,8 +914,7 @@ func (c *ESClient) updateTemplatesPolicyAndRollover(dataNodes int) error {
 	// - update the ISM policy's min_size value accordingly
 	// - force rollover, so we use the new number of shards
 
-	//TODO make sure we only do stuff IF NEEDED
-	err := c.addComponentTemplates()
+	err := c.addMainComponentTemplate()
 	if err != nil {
 		return err
 	}
@@ -760,11 +926,13 @@ func (c *ESClient) updateTemplatesPolicyAndRollover(dataNodes int) error {
 		numberOfShards = dataNodes / 2
 	}
 
-	err = c.updateComponentTemplate(numberOfShards)
+	//TODO only if number of shards is different now
+	err = c.updateShardsComponentTemplate(numberOfShards)
 	if err != nil {
 		return err
 	}
 
+	//TODO maintain sane total_shards_per_node values, too
 	err = c.addTemplate()
 	if err != nil {
 		return err
