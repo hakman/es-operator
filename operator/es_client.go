@@ -500,6 +500,10 @@ func (c *ESClient) updateShardsComponentTemplate(numberOfShards int, dataNodes i
 	if dataNodes%2 == 0 {
 		totalShardsPerNode = 1
 	}
+	// FIXME: we allow +1 shards than necessary for headroom, but also due to
+	// https://github.com/elastic/elasticsearch/issues/12273
+	// Title: ES doesn't exhaust options for allocation leaving unassigned shards
+	totalShardsPerNode = totalShardsPerNode + 1
 
 	if needsUpdating {
 		template := fmt.Sprintf(
